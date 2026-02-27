@@ -1,0 +1,78 @@
+name: Sync Docs
+on:
+  push:
+    paths:
+      - 'DOCS/**'
+      - 'assets/logo.*'
+      - '.github/workflows/sync-docs.yml'
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register project and upload docs
+        run: |
+          HUB_URL="https://tandem-docs.vercel.app"
+          PROJECT_SLUG="hernan"
+          PROJECT_NAME="Prueba Hernancito"
+          REPO_NAME="prueba-hernan"
+          REPO_URL="https://github.com/8DevPandas/prueba-hernan"
+
+          # Register project (idempotent — returns existing if already created)
+          echo "📝 Registering project..."
+          REGISTER_PAYLOAD=$(jq -n \
+            --arg slug "$PROJECT_SLUG" \
+            --arg name "$PROJECT_NAME" \
+            --arg repoName "$REPO_NAME" \
+            --arg repoUrl "$REPO_URL" \
+            '{slug: $slug, name: $name} + (if $repoName != "" then {repoName: $repoName} else {} end) + (if $repoUrl != "" then {repoUrl: $repoUrl} else {} end)')
+          curl -sf -X POST "$HUB_URL/api/projects/register" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ADMIN_API_KEY" \
+            -d "$REGISTER_PAYLOAD"
+          echo ""
+          echo "✅ Project registered"
+
+          # Build and upload docs (using temp files to avoid argument length limits)
+          echo "📄 Uploading documentation..."
+          TMPFILE=$(mktemp)
+          echo '[]' > "$TMPFILE"
+          SORT_ORDER=0
+          for file in $(ls DOCS/*.md | sort); do
+            FILENAME=$(basename "$file")
+            SLUG="${FILENAME%.md}"
+            TITLE=$(grep -m1 '^# ' "$file" | sed 's/^# //' || echo "$SLUG")
+            [ -z "$TITLE" ] && TITLE="$SLUG"
+            jq --rawfile content "$file" \
+               --arg slug "$SLUG" \
+               --arg title "$TITLE" \
+               --argjson sortOrder "$SORT_ORDER" \
+               '. + [{slug: $slug, title: $title, content: $content, sortOrder: $sortOrder}]' \
+               "$TMPFILE" > "${TMPFILE}.tmp" && mv "${TMPFILE}.tmp" "$TMPFILE"
+            SORT_ORDER=$((SORT_ORDER + 1))
+          done
+          jq '{docs: ., replace: true}' "$TMPFILE" > "${TMPFILE}.payload"
+          RESPONSE=$(curl -sf -X POST "$HUB_URL/api/projects/$PROJECT_SLUG/docs" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ADMIN_API_KEY" \
+            -d @"${TMPFILE}.payload")
+          echo "$RESPONSE"
+          rm -f "$TMPFILE" "${TMPFILE}.tmp" "${TMPFILE}.payload"
+          echo "✅ Docs synced"
+
+          # Upload logo if exists
+          LOGO=$(ls assets/logo.* 2>/dev/null | head -1 || true)
+          if [ -n "$LOGO" ]; then
+            echo "🖼️ Uploading logo..."
+            MIME=$(file --mime-type -b "$LOGO")
+            curl -sf -X POST "$HUB_URL/api/projects/$PROJECT_SLUG/logo" \
+              -H "Content-Type: $MIME" \
+              -H "x-api-key: $ADMIN_API_KEY" \
+              --data-binary "@$LOGO"
+            echo ""
+            echo "✅ Logo uploaded"
+          fi
+        env:
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
